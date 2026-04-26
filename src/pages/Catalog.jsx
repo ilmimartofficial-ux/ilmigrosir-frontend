@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { getProducts, getCategories } from '../api/client'
 import ProductCard from '../components/ProductCard.jsx'
-import { Search, Filter, X, ChevronLeft, ChevronRight, Loader } from 'lucide-react'
+import { Search, Filter, X, ChevronLeft, ChevronRight } from 'lucide-react'
 
 export default function Catalog() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -10,49 +10,81 @@ export default function Catalog() {
   const [categories, setCategories] = useState([])
   const [pagination, setPagination] = useState({})
   const [loading, setLoading] = useState(true)
+
+  // Semua filter state disatukan
   const [search, setSearch] = useState(searchParams.get('search') || '')
   const [category, setCategory] = useState(searchParams.get('category') || 'all')
-  const [page, setPage] = useState(1)
+  const [page, setPage] = useState(Number(searchParams.get('page')) || 1)
+
   const [showFilter, setShowFilter] = useState(false)
   const searchRef = useRef(null)
   const debounceRef = useRef(null)
+  const abortRef = useRef(null) // untuk cancel request lama
 
-  // Load categories once
+  // Load categories sekali saja
   useEffect(() => {
     getCategories().then(r => setCategories(r.data.data)).catch(console.error)
   }, [])
 
-  // Load products
-  const loadProducts = useCallback((s, cat, p) => {
-    setLoading(true)
-    getProducts({ search: s, category: cat === 'all' ? '' : cat, page: p, limit: 60 })
-      .then(r => {
-        setProducts(r.data.data)
-        setPagination(r.data.pagination)
-      })
-      .catch(console.error)
-      .finally(() => setLoading(false))
-  }, [])
-
+  // ✅ SATU useEffect untuk semua trigger — tidak ada race condition
   useEffect(() => {
     clearTimeout(debounceRef.current)
+
+    // Debounce hanya berlaku saat search berubah
+    const delay = 350
+
     debounceRef.current = setTimeout(() => {
-      setPage(1)
-      loadProducts(search, category, 1)
-      // Sync URL
-      const p = {}
-      if (search) p.search = search
-      if (category !== 'all') p.category = category
-      setSearchParams(p, { replace: true })
-    }, 350)
+      // Cancel request sebelumnya jika masih berjalan
+      if (abortRef.current) abortRef.current.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+
+      setLoading(true)
+
+      getProducts({
+        search,
+        category: category === 'all' ? '' : category,
+        page,
+        limit: 60,
+        signal: controller.signal // axios mendukung AbortController
+      })
+        .then(r => {
+          setProducts(r.data.data)
+          setPagination(r.data.pagination)
+        })
+        .catch(err => {
+          if (err.name !== 'CanceledError' && err.code !== 'ERR_CANCELED') {
+            console.error(err)
+          }
+        })
+        .finally(() => setLoading(false))
+
+      // Sync URL params
+      const params = {}
+      if (search) params.search = search
+      if (category !== 'all') params.category = category
+      if (page > 1) params.page = page
+      setSearchParams(params, { replace: true })
+    }, delay)
+
     return () => clearTimeout(debounceRef.current)
-  }, [search, category])
+  }, [search, category, page]) // ✅ semua dependensi dalam satu effect
 
-  useEffect(() => {
-    loadProducts(search, category, page)
-  }, [page])
+  const clearSearch = () => {
+    setSearch('')
+    setPage(1)
+    searchRef.current?.focus()
+  }
 
-  const clearSearch = () => { setSearch(''); searchRef.current?.focus() }
+  const handleCategoryChange = (cat) => {
+    setCategory(cat)
+    setPage(1) // reset page saat filter berubah
+  }
+
+  const handlePageChange = (p) => {
+    setPage(p)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   return (
     <main style={{ minHeight: '100vh' }}>
@@ -74,7 +106,7 @@ export default function Catalog() {
               ref={searchRef}
               className="input"
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={e => { setSearch(e.target.value); setPage(1) }}
               placeholder="Cari produk... (nama, kode, kategori)"
               style={{ paddingLeft: 36, paddingRight: search ? 36 : 14 }}
             />
@@ -88,11 +120,16 @@ export default function Catalog() {
               </button>
             )}
           </div>
+
           {/* Filter button */}
           <button
             className="btn btn-outline btn-sm"
             onClick={() => setShowFilter(!showFilter)}
-            style={{ flexShrink: 0, borderColor: showFilter ? 'var(--red)' : undefined, color: showFilter ? 'var(--red)' : undefined }}
+            style={{
+              flexShrink: 0,
+              borderColor: showFilter ? 'var(--red)' : undefined,
+              color: showFilter ? 'var(--red)' : undefined
+            }}
           >
             <Filter size={16} />
             <span className="hide-mobile">Filter</span>
@@ -110,7 +147,7 @@ export default function Catalog() {
             {[{ jenis: 'all', count: pagination.total || 0 }, ...categories].map(cat => (
               <button
                 key={cat.jenis}
-                onClick={() => setCategory(cat.jenis)}
+                onClick={() => handleCategoryChange(cat.jenis)}
                 style={{
                   flexShrink: 0,
                   padding: '5px 12px', borderRadius: 99,
@@ -149,7 +186,7 @@ export default function Catalog() {
           {(search || category !== 'all') && (
             <button
               className="btn btn-outline btn-sm"
-              onClick={() => { setSearch(''); setCategory('all') }}
+              onClick={() => { setSearch(''); setCategory('all'); setPage(1) }}
               style={{ fontSize: 12 }}
             >
               <X size={14} /> Reset Filter
@@ -169,9 +206,7 @@ export default function Catalog() {
             ))}
           </div>
         ) : products.length === 0 ? (
-          <div style={{
-            textAlign: 'center', padding: '60px 20px'
-          }}>
+          <div style={{ textAlign: 'center', padding: '60px 20px' }}>
             <div style={{ fontSize: 48, marginBottom: 12 }}>🔍</div>
             <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 8 }}>Produk Tidak Ditemukan</h3>
             <p style={{ color: 'var(--gray-500)', fontSize: 14, marginBottom: 20 }}>
@@ -203,20 +238,19 @@ export default function Catalog() {
           }}>
             <button
               className="btn btn-outline btn-sm"
-              onClick={() => { setPage(p => p - 1); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+              onClick={() => handlePageChange(page - 1)}
               disabled={page <= 1}
             >
               <ChevronLeft size={16} /> Prev
             </button>
 
-            {/* Page numbers */}
             {pagesArr(pagination.pages, page).map((p, i) =>
               p === '...' ? (
                 <span key={`e${i}`} style={{ color: 'var(--gray-500)', padding: '0 4px' }}>...</span>
               ) : (
                 <button
                   key={p}
-                  onClick={() => { setPage(p); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+                  onClick={() => handlePageChange(p)}
                   style={{
                     width: 36, height: 36, borderRadius: 8,
                     fontWeight: 800, fontSize: 13,
@@ -233,7 +267,7 @@ export default function Catalog() {
 
             <button
               className="btn btn-outline btn-sm"
-              onClick={() => { setPage(p => p + 1); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+              onClick={() => handlePageChange(page + 1)}
               disabled={!pagination.has_next}
             >
               Next <ChevronRight size={16} />
